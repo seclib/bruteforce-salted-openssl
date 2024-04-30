@@ -34,6 +34,7 @@ the covered work.
 #include <locale.h>
 #include <math.h>
 #include <pthread.h>
+#include <regex.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,6 +74,7 @@ unsigned char *binary_charset =     "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0
 
 unsigned char *path = NULL, *dictionary_file = NULL, *state_file = NULL;
 unsigned char *data = NULL, salt[8], *binary = NULL, *magic = NULL;
+regex_t magic_regex;
 wchar_t *charset = NULL, *prefix = NULL, *suffix = NULL;
 unsigned int charset_len, data_len = 0, min_len = 1, max_len = 8, prefix_len = 0, suffix_len = 0, preview_len = 1024;
 FILE *dictionary = NULL;
@@ -518,8 +520,12 @@ void * decryption_func(void *arg)
       {
         if(magic == NULL)
           preview_found = valid_data(out, total_out_len);
-        else
-          preview_found = !strncmp(out, magic, strlen(magic));
+        else {
+          int ret2 = regexec(&magic_regex, out, 0, NULL, 0);
+          if (ret2 == 0) {
+            preview_found = 1;
+          }
+        }
       }
     } else {
       /* If not doing a preview decryption, pretend we found a hit so we decrypt the remaining data. */
@@ -542,8 +548,24 @@ void * decryption_func(void *arg)
     {
       if(magic == NULL)
         found = valid_data(out, total_out_len);
-      else
-        found = !strncmp(out, magic, strlen(magic));
+      else {
+          int ret2 = regexec(&magic_regex, out, 0, NULL, 0);
+          if (ret2 == 0) {
+            found = 1;
+          } else if (debug) {
+            if (ret2 == REG_NOMATCH) {
+              fprintf(stderr, "REG_NOMATCH: %s | ", pwd);
+              print_hex(out, total_out_len);
+              print_hex(magic, strlen(magic));
+              printf("\n");
+            } else {
+              // error
+              char errBuf[100] = {0};
+              regerror(ret2, &magic_regex, errBuf, sizeof(errBuf));
+              fprintf(stderr, "error: %s %s \t| %s\n", errBuf, out);
+            }
+          }
+        }
     }
     else
       found = 0;
@@ -891,7 +913,7 @@ void usage(char *progname)
   fprintf(stderr, "                 default: \"\"\n\n");
   fprintf(stderr, "  -c <cipher>  Cipher for decryption.\n");
   fprintf(stderr, "                 default: aes-256-cbc\n\n");
-  fprintf(stderr, "  -D           Display salt, key and iv along with the tested password.\n\n");
+  fprintf(stderr, "  -D           Debug output; display salt, key, iv, password...\n\n");
   fprintf(stderr, "  -d <digest>  Digest for key and initialization vector generation.\n");
   fprintf(stderr, "                 default: sha256\n\n");
   fprintf(stderr, "  -e <string>  End of the password.\n");
@@ -905,14 +927,15 @@ void usage(char *progname)
   fprintf(stderr, "  -l <length>  Minimum password length (beginning and end included).\n");
   fprintf(stderr, "                 default: 1\n\n");
   fprintf(stderr, "  -M <string>  Consider the decryption as successful when the data starts\n");
-  fprintf(stderr, "               with <string>. Without this option, the decryption is considered\n");
+  fprintf(stderr, "               with regex <string>. Without this option, the decryption is considered\n");
   fprintf(stderr, "               as successful when the data contains mostly printable ASCII\n");
-  fprintf(stderr, "               characters (at least 90%%).\n\n");
+  fprintf(stderr, "               characters (at least 90%%). Example using substitution:\n");
+  fprintf(stderr, "                 -M ^\"$(echo -e \"\x89\")\"PNG\n\n");
   fprintf(stderr, "  -m <length>  Maximum password length (beginning and end included).\n");
   fprintf(stderr, "                 default: 8\n\n");
   fprintf(stderr, "  -N           Ignore decryption errors (similar to openssl -nopad).\n\n");
   fprintf(stderr, "  -n           Ignore salt (similar to openssl -nosalt).\n\n");
-  fprintf(stderr, "  -p <n>       Preview and check the first N decrypted bytes for the magic string.\n");
+  fprintf(stderr, "  -p <n>       Preview and check the first N decrypted bytes for the regex magic string.\n");
   fprintf(stderr, "               If the magic string is present, try decrypting the rest of the data.\n");
   fprintf(stderr, "                 default: 1024\n\n");
   fprintf(stderr, "  -s <string>  Password character set.\n");
@@ -1268,6 +1291,13 @@ int main(int argc, char **argv)
     }
   }
 
+  if (magic != NULL) {
+    if (regcomp(&magic_regex, magic, REG_EXTENDED) != 0) {
+      fprintf(stderr, "Error: Invalid regex magic pattern.\n\n");
+      exit(EXIT_FAILURE);
+    }
+  }
+
   data = (char *) malloc(data_len);
   if(data == NULL)
   {
@@ -1363,6 +1393,7 @@ int main(int argc, char **argv)
   pthread_mutex_destroy(&get_password_lock);
   free(data);
   EVP_cleanup();
+  regfree(&magic_regex);
 
   if(found_password == 0)
   {
